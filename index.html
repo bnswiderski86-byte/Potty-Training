@@ -1676,7 +1676,7 @@ const SB_HEADERS = {
 
 // ─── PIN PROTECTION ───
 // Change this to any 4-digit code you want. All devices must use the same PIN.
-const APP_PIN = '1115'; // Thomas's birth month + day — change to whatever you want
+const APP_PIN = '1115';
 
 // ─── SUPABASE HELPERS ───
 async function sbGet(table, params = '') {
@@ -1980,14 +1980,15 @@ async function quickLog(type) {
     state.lastLogDate = today;
   }
 
-  // Local cache first
+  // Push to Supabase first to get the UUID back
+  const sbId = await pushLogEntry(entry);
+  if (sbId) entry.id = sbId;
+
+  // Then cache locally with the UUID attached
   state.logEntries.unshift(entry);
   localStorage.setItem('th_log', JSON.stringify(state.logEntries));
 
-  // Push to Supabase (async, non-blocking)
-  pushLogEntry(entry);
   pushStats();
-
   updateHomeStats();
   updateStarBoard();
   renderTracker();
@@ -2132,13 +2133,15 @@ async function addLogEntry() {
   if (type === 'success') { state.successes++; state.stars++; }
   if (type === 'accident') { state.accidents++; }
 
+  // Get UUID from Supabase first
+  const sbId = await pushLogEntry(entry);
+  if (sbId) entry.id = sbId;
+
   state.logEntries.unshift(entry);
   localStorage.setItem('th_log', JSON.stringify(state.logEntries));
   document.getElementById('logNoteInput').value = '';
 
-  pushLogEntry(entry);
   pushStats();
-
   renderTracker();
   updateStarBoard();
   updateHomeStats();
