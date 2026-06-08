@@ -1624,6 +1624,21 @@
   </div>
 </div>
 
+<!-- PIN MODAL -->
+<div class="modal-overlay" id="pinModal" style="display:flex;background:rgba(0,0,0,0.7);">
+  <div class="modal" style="text-align:center;max-width:360px;">
+    <div style="font-size:3rem;margin-bottom:10px;">🔐</div>
+    <h2>Thomas's Potty App</h2>
+    <p style="color:var(--text-mid);margin:10px 0 20px;font-size:0.9rem;">Enter your family PIN to open the app and sync your data across all devices.</p>
+    <input type="password" id="pinInput" placeholder="Enter PIN" maxlength="6"
+      style="width:100%;text-align:center;font-size:1.5rem;letter-spacing:0.3em;margin-bottom:14px;padding:14px;"
+      onkeydown="if(event.key==='Enter')checkPin()">
+    <button class="btn btn-pink" style="width:100%;" onclick="checkPin()">Unlock 🌟</button>
+    <p id="pinError" style="color:var(--pink);margin-top:10px;font-size:0.85rem;display:none;">Wrong PIN — try again!</p>
+    <p style="font-size:0.75rem;color:var(--text-mid);margin-top:14px;">Hint: check the APP_PIN in the HTML file if you've forgotten it.</p>
+  </div>
+</div>
+
 <!-- CELEBRATION MODAL -->
 <div class="modal-overlay" id="celebrationModal">
   <div class="modal" style="text-align:center;">
@@ -1640,10 +1655,79 @@
   <span id="notifMsg">Logged!</span>
 </div>
 
+<!-- SYNC STATUS BAR -->
+<div style="position:fixed;bottom:0;left:0;right:0;background:rgba(255,255,255,0.95);backdrop-filter:blur(8px);border-top:2px solid #f0f0f8;padding:8px 16px;display:flex;align-items:center;justify-content:space-between;z-index:99;font-size:0.8rem;">
+  <span id="syncStatus" style="font-weight:700;color:var(--green-dark);">☁️ Ready</span>
+  <button onclick="syncFromSupabase()" style="padding:5px 14px;border-radius:50px;border:2px solid var(--blue);background:white;cursor:pointer;font-family:'Handlee',cursive;font-size:0.85rem;color:var(--blue-dark);">🔄 Sync Now</button>
+</div>
+
 <div class="confetti-container" id="confetti"></div>
 
 <script>
+// ─── SUPABASE CONFIG ───
+const SB_URL = 'https://sdkihobprbgbkrqgurqh.supabase.co';
+const SB_KEY = 'sb_publishable_XHvk0yy9qfuVSfRhwPh-aA_zPNRULww';
+const SB_HEADERS = {
+  'Content-Type': 'application/json',
+  'apikey': SB_KEY,
+  'Authorization': 'Bearer ' + SB_KEY,
+  'Prefer': 'return=representation'
+};
+
+// ─── PIN PROTECTION ───
+// Change this to any 4-digit code you want. All devices must use the same PIN.
+const APP_PIN = '0601'; // Thomas's birth month + day — change to whatever you want
+
+// ─── SUPABASE HELPERS ───
+async function sbGet(table, params = '') {
+  try {
+    const r = await fetch(`${SB_URL}/rest/v1/${table}${params}`, {
+      headers: { ...SB_HEADERS, 'Prefer': 'return=representation' }
+    });
+    if (!r.ok) throw new Error(await r.text());
+    return await r.json();
+  } catch(e) { console.warn('sbGet failed:', e); return null; }
+}
+
+async function sbInsert(table, data) {
+  try {
+    const r = await fetch(`${SB_URL}/rest/v1/${table}`, {
+      method: 'POST',
+      headers: SB_HEADERS,
+      body: JSON.stringify(data)
+    });
+    if (!r.ok) throw new Error(await r.text());
+    return await r.json();
+  } catch(e) { console.warn('sbInsert failed:', e); return null; }
+}
+
+async function sbUpdate(table, match, data) {
+  try {
+    const params = Object.entries(match).map(([k,v]) => `${k}=eq.${v}`).join('&');
+    const r = await fetch(`${SB_URL}/rest/v1/${table}?${params}`, {
+      method: 'PATCH',
+      headers: SB_HEADERS,
+      body: JSON.stringify(data)
+    });
+    if (!r.ok) throw new Error(await r.text());
+    return true;
+  } catch(e) { console.warn('sbUpdate failed:', e); return false; }
+}
+
+async function sbDelete(table, match) {
+  try {
+    const params = Object.entries(match).map(([k,v]) => `${k}=eq.${v}`).join('&');
+    const r = await fetch(`${SB_URL}/rest/v1/${table}?${params}`, {
+      method: 'DELETE',
+      headers: SB_HEADERS
+    });
+    if (!r.ok) throw new Error(await r.text());
+    return true;
+  } catch(e) { console.warn('sbDelete failed:', e); return false; }
+}
+
 // ─── STATE ───
+// localStorage is the local cache; Supabase is the source of truth.
 const state = {
   readinessChecked: 0,
   totalChecks: 10,
@@ -1652,7 +1736,6 @@ const state = {
   accidents: parseInt(localStorage.getItem('th_accidents') || '0'),
   dryChecks: parseInt(localStorage.getItem('th_dry') || '0'),
   logEntries: JSON.parse(localStorage.getItem('th_log') || '[]'),
-  gridCells: JSON.parse(localStorage.getItem('th_grid') || '[]'),
   fluidCount: parseInt(localStorage.getItem('th_fluid') || '0'),
   timerInterval: null,
   timerSeconds: 0,
@@ -1662,10 +1745,169 @@ const state = {
   breatheTimeout: null,
   trainingStartDate: localStorage.getItem('th_startDate') || null,
   streakDays: parseInt(localStorage.getItem('th_streak') || '0'),
-  lastLogDate: localStorage.getItem('th_lastLogDate') || null
+  lastLogDate: localStorage.getItem('th_lastLogDate') || null,
+  online: navigator.onLine,
+  pendingSync: JSON.parse(localStorage.getItem('th_pending') || '[]'),
+  authenticated: false
 };
 
-// ─── NAV ───
+// ─── SYNC: LOAD FROM SUPABASE ───
+async function syncFromSupabase() {
+  showSyncStatus('syncing');
+
+  // Load stats
+  const stats = await sbGet('stats', '?id=eq.thomas');
+  if (stats && stats.length > 0) {
+    const s = stats[0];
+    state.stars = s.stars || 0;
+    state.successes = s.successes || 0;
+    state.accidents = s.accidents || 0;
+    state.dryChecks = s.dry_checks || 0;
+    state.streakDays = s.streak || 0;
+    state.lastLogDate = s.last_log_date || null;
+    state.trainingStartDate = s.start_date || null;
+    // Write back to localStorage as cache
+    localStorage.setItem('th_stars', state.stars);
+    localStorage.setItem('th_successes', state.successes);
+    localStorage.setItem('th_accidents', state.accidents);
+    localStorage.setItem('th_dry', state.dryChecks);
+    localStorage.setItem('th_streak', state.streakDays);
+    localStorage.setItem('th_lastLogDate', state.lastLogDate);
+    if (state.trainingStartDate) localStorage.setItem('th_startDate', state.trainingStartDate);
+  }
+
+  // Load log entries (last 100)
+  const entries = await sbGet('log_entries', '?order=created_at.desc&limit=100');
+  if (entries) {
+    state.logEntries = entries.map(e => ({
+      id: e.id,
+      time: e.entry_time,
+      type: e.type,
+      note: e.note || '',
+      date: e.entry_date
+    }));
+    localStorage.setItem('th_log', JSON.stringify(state.logEntries));
+  }
+
+  // Flush any pending offline writes
+  await flushPending();
+
+  showSyncStatus('ok');
+  updateHomeStats();
+  updateStarBoard();
+  renderTracker();
+}
+
+// ─── SYNC: PUSH STATS TO SUPABASE ───
+async function pushStats() {
+  const data = {
+    stars: state.stars,
+    successes: state.successes,
+    accidents: state.accidents,
+    dry_checks: state.dryChecks,
+    streak: state.streakDays,
+    last_log_date: state.lastLogDate,
+    start_date: state.trainingStartDate
+  };
+  // Save locally first always
+  localStorage.setItem('th_stars', state.stars);
+  localStorage.setItem('th_successes', state.successes);
+  localStorage.setItem('th_accidents', state.accidents);
+  localStorage.setItem('th_dry', state.dryChecks);
+  localStorage.setItem('th_streak', state.streakDays);
+  localStorage.setItem('th_lastLogDate', state.lastLogDate);
+  if (state.trainingStartDate) localStorage.setItem('th_startDate', state.trainingStartDate);
+
+  if (!state.online) {
+    queuePending({ type: 'stats', data });
+    return;
+  }
+  await sbUpdate('stats', { id: 'thomas' }, data);
+}
+
+// ─── SYNC: PUSH LOG ENTRY TO SUPABASE ───
+async function pushLogEntry(entry) {
+  const data = {
+    entry_date: entry.date,
+    entry_time: entry.time,
+    type: entry.type,
+    note: entry.note || ''
+  };
+  if (!state.online) {
+    queuePending({ type: 'log_insert', data });
+    return null;
+  }
+  const result = await sbInsert('log_entries', data);
+  return result && result[0] ? result[0].id : null;
+}
+
+// ─── OFFLINE QUEUE ───
+function queuePending(item) {
+  state.pendingSync.push(item);
+  localStorage.setItem('th_pending', JSON.stringify(state.pendingSync));
+  showSyncStatus('offline');
+}
+
+async function flushPending() {
+  if (!state.pendingSync.length || !state.online) return;
+  const remaining = [];
+  for (const item of state.pendingSync) {
+    let ok = false;
+    if (item.type === 'stats') ok = await sbUpdate('stats', { id: 'thomas' }, item.data);
+    if (item.type === 'log_insert') { const r = await sbInsert('log_entries', item.data); ok = !!r; }
+    if (item.type === 'log_delete') ok = await sbDelete('log_entries', { id: item.id });
+    if (!ok) remaining.push(item);
+  }
+  state.pendingSync = remaining;
+  localStorage.setItem('th_pending', JSON.stringify(remaining));
+  if (!remaining.length) showSyncStatus('ok');
+}
+
+// ─── SYNC STATUS INDICATOR ───
+function showSyncStatus(status) {
+  const el = document.getElementById('syncStatus');
+  if (!el) return;
+  const map = {
+    syncing: { text: '🔄 Syncing...', color: 'var(--blue)' },
+    ok:      { text: '☁️ Synced', color: 'var(--green-dark)' },
+    offline: { text: '📴 Offline — will sync when connected', color: 'var(--orange)' },
+    error:   { text: '⚠️ Sync error', color: 'var(--pink)' }
+  };
+  const s = map[status] || map.ok;
+  el.textContent = s.text;
+  el.style.color = s.color;
+}
+
+// ─── ONLINE/OFFLINE LISTENERS ───
+window.addEventListener('online', async () => {
+  state.online = true;
+  await flushPending();
+  await syncFromSupabase();
+});
+window.addEventListener('offline', () => {
+  state.online = false;
+  showSyncStatus('offline');
+});
+
+// ─── PIN AUTH ───
+function showPinModal() {
+  document.getElementById('pinModal').style.display = 'flex';
+  setTimeout(() => document.getElementById('pinInput').focus(), 100);
+}
+
+function checkPin() {
+  const entered = document.getElementById('pinInput').value;
+  if (entered === APP_PIN) {
+    sessionStorage.setItem('th_pin', APP_PIN);
+    state.authenticated = true;
+    document.getElementById('pinModal').style.display = 'none';
+    syncFromSupabase();
+  } else {
+    document.getElementById('pinError').style.display = 'block';
+    document.getElementById('pinInput').value = '';
+    document.getElementById('pinInput').focus();
+  }
+}
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
@@ -1708,53 +1950,47 @@ function updateReadiness() {
 }
 
 // ─── QUICK LOG ───
-function quickLog(type) {
+async function quickLog(type) {
   if (!state.trainingStartDate) {
     state.trainingStartDate = new Date().toISOString();
-    localStorage.setItem('th_startDate', state.trainingStartDate);
   }
   const now = new Date();
   const timeStr = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0');
   const entry = { time: timeStr, type, note: '', date: now.toDateString() };
-  state.logEntries.unshift(entry);
-  localStorage.setItem('th_log', JSON.stringify(state.logEntries));
 
   if (type === 'success') {
     state.successes++;
     state.stars++;
-    localStorage.setItem('th_successes', state.successes);
-    localStorage.setItem('th_stars', state.stars);
     celebrate();
   } else if (type === 'accident') {
     state.accidents++;
-    localStorage.setItem('th_accidents', state.accidents);
     showNotif('💧', 'Logged — neutral response + re-route to potty!');
   } else if (type === 'dry') {
     state.dryChecks++;
-    localStorage.setItem('th_dry', state.dryChecks);
-    showNotif('✅', 'Great — staying dry! Log it!');
+    showNotif('✅', 'Great — staying dry!');
   } else {
     showNotif('🙌', 'Close call! He\'s learning!');
   }
 
-  // Check streak
-  const today = new Date().toDateString();
+  // Streak logic
+  const today = now.toDateString();
   if (state.lastLogDate !== today) {
     const yesterday = new Date(Date.now() - 86400000).toDateString();
-    if (state.lastLogDate === yesterday) {
-      state.streakDays++;
-    } else if (!state.lastLogDate) {
-      state.streakDays = 1;
-    } else {
-      state.streakDays = 1;
-    }
+    state.streakDays = (state.lastLogDate === yesterday) ? state.streakDays + 1 : (!state.lastLogDate ? 1 : 1);
     state.lastLogDate = today;
-    localStorage.setItem('th_streak', state.streakDays);
-    localStorage.setItem('th_lastLogDate', today);
   }
+
+  // Local cache first
+  state.logEntries.unshift(entry);
+  localStorage.setItem('th_log', JSON.stringify(state.logEntries));
+
+  // Push to Supabase (async, non-blocking)
+  pushLogEntry(entry);
+  pushStats();
 
   updateHomeStats();
   updateStarBoard();
+  renderTracker();
 }
 
 function showNotif(emoji, msg) {
@@ -1887,17 +2123,26 @@ function populateTimeSelect() {
   }
 }
 
-function addLogEntry() {
+async function addLogEntry() {
   const time = document.getElementById('logTimeInput').value;
   const type = document.getElementById('logTypeInput').value;
   const note = document.getElementById('logNoteInput').value;
-  state.logEntries.unshift({ time, type, note, date: new Date().toDateString() });
+  const entry = { time, type, note, date: new Date().toDateString() };
+
+  if (type === 'success') { state.successes++; state.stars++; }
+  if (type === 'accident') { state.accidents++; }
+
+  state.logEntries.unshift(entry);
   localStorage.setItem('th_log', JSON.stringify(state.logEntries));
-  if (type === 'success') { state.successes++; state.stars++; localStorage.setItem('th_successes', state.successes); localStorage.setItem('th_stars', state.stars); }
-  if (type === 'accident') { state.accidents++; localStorage.setItem('th_accidents', state.accidents); }
   document.getElementById('logNoteInput').value = '';
+
+  pushLogEntry(entry);
+  pushStats();
+
   renderTracker();
   updateStarBoard();
+  updateHomeStats();
+  showNotif('📝', 'Entry saved and synced!');
 }
 
 function renderTracker() {
@@ -1925,7 +2170,15 @@ function renderLogTable() {
   }).join('');
 }
 
-function deleteLog(i) {
+async function deleteLog(i) {
+  const entry = state.logEntries[i];
+  if (entry && entry.id) {
+    if (!state.online) {
+      queuePending({ type: 'log_delete', id: entry.id });
+    } else {
+      sbDelete('log_entries', { id: entry.id });
+    }
+  }
   state.logEntries.splice(i, 1);
   localStorage.setItem('th_log', JSON.stringify(state.logEntries));
   renderTracker();
@@ -2046,8 +2299,8 @@ function updateStarBoard() {
 
 function addStar() {
   state.stars++;
-  localStorage.setItem('th_stars', state.stars);
   updateStarBoard();
+  pushStats();
   showNotif('⭐', 'Star added! ' + state.stars + ' total!');
 }
 
@@ -2286,10 +2539,14 @@ function init() {
   initPrintCards();
   renderWeekPlan();
 
-  // Init star board for rewards tab
-  document.querySelectorAll('.screen').forEach(s => {
-    if (s.id === 'screen-rewards') updateStarBoard();
-  });
+  // Check PIN auth
+  const savedPin = sessionStorage.getItem('th_pin');
+  if (savedPin === APP_PIN) {
+    state.authenticated = true;
+    syncFromSupabase();
+  } else {
+    showPinModal();
+  }
 }
 
 init();
